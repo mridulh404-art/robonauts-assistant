@@ -77,6 +77,12 @@
   </section>
 
   <section>
+    <h2>Animations</h2>
+    <div class="grid" id="animList"><small>Loading animations...</small></div>
+    <div class="row"><button id="animStop">Stop animation</button></div>
+  </section>
+
+  <section>
     <h2>Songs (OLED music show)</h2>
     <p><small>Pick a song's .mp3 and its .rbf.gz frame file together (made with export_frames.py). They stay saved on this phone.</small></p>
     <input id="songFiles" type="file" multiple accept=".mp3,.gz,audio/*,application/gzip">
@@ -87,6 +93,24 @@
       <small id="songInfo" style="flex:2;text-align:right">No song playing</small>
     </div>
     <audio id="player" preload="auto"></audio>
+  </section>
+
+  <section>
+    <h2>Robot settings (standalone mode)</h2>
+    <p><small id="robotInfo">Connect to see the robot's status.</small></p>
+    <input id="wifiSsid" placeholder="Wi-Fi name (2.4 GHz)" autocomplete="off">
+    <input id="wifiPass" type="password" placeholder="Wi-Fi password" style="margin-top:8px">
+    <div class="row"><button id="wifiSave" class="primary">Save Wi-Fi to robot</button></div>
+    <div class="row" style="align-items:center">
+      <small style="flex:1">Sleep at</small><input id="sleepH" type="number" min="0" max="23" value="22">
+      <small style="flex:1;text-align:center">wake at</small><input id="wakeH" type="number" min="0" max="23" value="7">
+    </div>
+    <div class="row">
+      <button id="sleepSave">Save sleep hours</button>
+      <button id="autoOn">Auto ON</button>
+      <button id="autoOff">Auto OFF</button>
+    </div>
+    <div class="row"><button id="infoBtn">Refresh status</button></div>
   </section>
 
   <section>
@@ -138,12 +162,14 @@ async function connect() {
     await st.startNotifications();
     st.addEventListener("characteristicvaluechanged", e => onStatus(new TextDecoder().decode(e.target.value)));
     setConnected(true);
+    send("TZ:" + (-new Date().getTimezoneOffset() * 60));
     syncClock();
     send("F:happy");
   } catch (e) { console.log(e); if (e.name !== "NotFoundError") alert("Connect failed: " + e.message); }
 }
 
 function send(cmd) {
+  animRun++;                                 // any command stops a running animation
   if (!cmdChar) { flash("Connect the robot first"); return Promise.resolve(); }
   chain = chain.then(() => cmdChar.writeValueWithResponse(enc.encode(cmd))).catch(e => console.log("write", e));
   return chain;
@@ -169,7 +195,18 @@ function syncClock() {
   send("T:" + local);
 }
 
+let robotAnims = 0;
 function onStatus(s) {
+  if (s.startsWith("INFO:")) {
+    const kv = Object.fromEntries(s.slice(5).split(",").map(x => x.split("=")));
+    robotAnims = parseInt(kv.anims || "0");
+    document.getElementById("robotInfo").textContent =
+      `Wi-Fi: ${kv.wifi}${kv.ssid ? " (" + kv.ssid + ")" : ""} | clock: ${kv.time} | auto: ${kv.auto === "1" ? "on" : "off"} | sleeps ${kv.sleep}h | ${robotAnims} animations stored`;
+    if (kv.ssid) document.getElementById("wifiSsid").value = kv.ssid;
+    const [sh, wh] = (kv.sleep || "22-7").split("-");
+    document.getElementById("sleepH").value = sh; document.getElementById("wakeH").value = wh;
+    return;
+  }
   if (s === "TIMER_DONE") { say("Time's up!"); if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]); }
 }
 
@@ -380,6 +417,7 @@ async function writeFrame(f) {              // 2-byte offset + data, chunk size 
 
 async function playSong(name) {
   stopSong();
+  animRun++;
   const rec = songs[name];
   try { show = await loadFrames(rec.rbf); } catch (e) { alert("Frame file error: " + e.message); return; }
   player.src = URL.createObjectURL(rec.mp3);
@@ -416,6 +454,74 @@ function stopSong() {
 }
 document.getElementById("songStop").onclick = stopSong;
 dbLoadAll();
+
+// ---------------------------------------------------------------- animations pack (animations.rbp.gz next to this page)
+let anims = [], animRun = 0;
+async function gunzipMaybe(bytes) {          // works whether or not the server already unzipped it
+  if (bytes[0] !== 0x1f || bytes[1] !== 0x8b) return bytes;
+  return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
+}
+async function loadAnims() {
+  const el = document.getElementById("animList");
+  try {
+    const r = await fetch("animations.rbp.gz", { cache: "no-cache" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const b = await gunzipMaybe(new Uint8Array(await r.arrayBuffer()));
+    if (String.fromCharCode(...b.slice(0, 4)) !== "RBP1") throw new Error("bad pack");
+    const dv = new DataView(b.buffer, b.byteOffset);
+    let p = 5;
+    for (let k = 0; k < b[4]; k++) {
+      const L = b[p], title = new TextDecoder().decode(b.slice(p + 1, p + 1 + L)); p += 1 + L;
+      const fps = b[p], count = dv.getUint16(p + 1, true); p += 3;
+      anims.push({ title, fps, count, frames: b.subarray(p, p + count * 1024) }); p += count * 1024;
+    }
+    el.innerHTML = "";
+    anims.forEach((a, i) => {
+      const btn = document.createElement("button"); btn.textContent = a.title; btn.style.fontSize = "13px";
+      btn.onclick = () => playAnim(i); el.appendChild(btn);
+    });
+  } catch (e) {
+    el.innerHTML = "<small>Upload animations.rbp.gz next to index.html on GitHub to get the animations (" + e.message + ").</small>";
+  }
+}
+async function playAnim(i) {
+  stopSong();
+  const onRobot = cmdChar && robotAnims === anims.length;   // robot has the same animations stored
+  if (onRobot) send("P:" + i);
+  const run = ++animRun, a = anims[i], t0 = performance.now();
+  let last = -1;
+  flash("Playing: " + a.title);
+  while (run === animRun) {
+    const idx = Math.floor((performance.now() - t0) / 1000 * a.fps) % a.count;   // loops forever
+    if (idx !== last) {
+      last = idx;
+      const f = a.frames.subarray(idx * 1024, idx * 1024 + 1024);
+      drawPreview(f);
+      if (frameChar && !onRobot) {
+        const job = chain.then(() => writeFrame(f));
+        chain = job.catch(() => {});
+        try { await job; } catch (e) { console.log("anim frame", e); }
+      }
+    } else await new Promise(r => setTimeout(r, 8));
+  }
+}
+document.getElementById("animStop").onclick = () => { send("F:neutral"); flash("Animation stopped"); };
+loadAnims();
+
+// ---------------------------------------------------------------- robot settings
+document.getElementById("wifiSave").onclick = () => {
+  const ssid = document.getElementById("wifiSsid").value.trim(), pass = document.getElementById("wifiPass").value;
+  if (!ssid) { flash("Type the Wi-Fi name first"); return; }
+  send("WIFI:" + ssid + "\t" + pass);
+  flash("Wi-Fi sent - the robot is connecting...");
+  setTimeout(() => send("INFO"), 8000);
+};
+document.getElementById("sleepSave").onclick = () => {
+  send(`SLEEP:${document.getElementById("sleepH").value},${document.getElementById("wakeH").value}`); send("INFO");
+};
+document.getElementById("autoOn").onclick = () => { send("AUTO:1"); send("INFO"); };
+document.getElementById("autoOff").onclick = () => { send("AUTO:0"); send("INFO"); };
+document.getElementById("infoBtn").onclick = () => send("INFO");
 </script>
 </body>
 </html>
