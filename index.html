@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14213D">
+<title>Robonauts Assistant</title>
+<style>
+  :root { --navy:#14213D; --gold:#FCA311; --card:#1d2d50; --text:#f1f3f8; --muted:#9aa6c0; --ok:#3ad07a; --bad:#ff5d5d; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--navy); color:var(--text); }
+  header { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:10px; padding:14px 16px; background:var(--navy); border-bottom:1px solid #2a3b63; }
+  header h1 { font-size:18px; margin:0; flex:1; color:var(--gold); letter-spacing:.5px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--bad); }
+  .dot.on { background:var(--ok); box-shadow:0 0 8px var(--ok); }
+  main { padding:12px 16px 120px; max-width:560px; margin:0 auto; }
+  section { background:var(--card); border-radius:16px; padding:14px; margin-bottom:14px; }
+  h2 { font-size:14px; margin:0 0 10px; color:var(--muted); text-transform:uppercase; letter-spacing:1px; }
+  button { font:inherit; border:0; border-radius:12px; padding:12px; background:#2c4170; color:var(--text); cursor:pointer; }
+  button:active { transform:scale(.97); }
+  button.primary { background:var(--gold); color:#14213D; font-weight:700; }
+  .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .grid4 { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+  .face { display:flex; flex-direction:column; align-items:center; gap:2px; font-size:13px; }
+  .face span { font-size:26px; }
+  input, textarea { width:100%; font:inherit; color:var(--text); background:#14213D; border:1px solid #2f426e; border-radius:12px; padding:12px; }
+  textarea { resize:vertical; min-height:70px; }
+  .row { display:flex; gap:8px; margin-top:8px; }
+  .row > * { flex:1; }
+  #log { font-size:14px; max-height:240px; overflow-y:auto; }
+  .msg { padding:8px 10px; border-radius:10px; margin:6px 0; line-height:1.35; }
+  .msg.me { background:#2c4170; margin-left:30px; }
+  .msg.bot { background:#14213D; border:1px solid #2f426e; margin-right:30px; }
+  #mic { position:fixed; left:50%; bottom:22px; transform:translateX(-50%); width:78px; height:78px; border-radius:50%;
+         background:var(--gold); color:#14213D; font-size:34px; box-shadow:0 6px 20px rgba(0,0,0,.4); z-index:6; }
+  #mic.listening { background:var(--bad); color:#fff; animation:pulse 1s infinite; }
+  @keyframes pulse { 50% { box-shadow:0 0 0 14px rgba(255,93,93,.25); } }
+  #heard { text-align:center; color:var(--muted); font-size:14px; min-height:20px; margin:4px 0 10px; }
+  small { color:var(--muted); }
+  details summary { cursor:pointer; color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div id="dot" class="dot"></div>
+  <h1>ROBONAUTS ASSISTANT</h1>
+  <button id="connectBtn" class="primary">Connect</button>
+</header>
+
+<main>
+  <div id="heard">Tap the mic and talk to your robot</div>
+
+  <section>
+    <h2>Faces</h2>
+    <div class="grid" id="faces"></div>
+  </section>
+
+  <section>
+    <h2>Clock &amp; Timer</h2>
+    <div class="grid4">
+      <button data-cmd="K">🕒 Clock</button>
+      <button data-timer="60">1 min</button>
+      <button data-timer="300">5 min</button>
+      <button data-timer="600">10 min</button>
+    </div>
+    <div class="row">
+      <input id="timerMin" type="number" min="1" max="999" placeholder="Minutes">
+      <button id="timerGo">Start</button>
+      <button data-cmd="TM:0">Cancel</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Message</h2>
+    <textarea id="msgText" placeholder="Type a message for the OLED"></textarea>
+    <div class="row"><button id="msgSend" class="primary">Show on robot</button></div>
+  </section>
+
+  <section>
+    <h2>Ask Robonauts (AI)</h2>
+    <div id="log"></div>
+    <div class="row">
+      <input id="askText" placeholder="Ask anything...">
+      <button id="askBtn" class="primary" style="flex:0 0 80px">Ask</button>
+    </div>
+    <details style="margin-top:10px">
+      <summary>AI settings</summary>
+      <p><small>Claude API key from console.anthropic.com. It is stored only on this phone.</small></p>
+      <input id="apiKey" type="password" placeholder="sk-ant-...">
+      <div class="row">
+        <label><input id="speakOn" type="checkbox" checked style="width:auto"> Speak answers</label>
+        <button id="saveKey">Save</button>
+      </div>
+    </details>
+  </section>
+</main>
+
+<button id="mic" aria-label="Talk">🎤</button>
+
+<script>
+// ---------------------------------------------------------------- Bluetooth link
+const SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const CMD     = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const STATUS  = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+const FRAME   = "6e400004-b5a3-f393-e0a9-e50e24dcca9e";
+let device = null, cmdChar = null, frameChar = null;
+let chain = Promise.resolve();               // BLE writes must happen one at a time
+const enc = new TextEncoder();
+
+function setConnected(on) {
+  document.getElementById("dot").classList.toggle("on", on);
+  document.getElementById("connectBtn").textContent = on ? "Connected" : "Connect";
+}
+
+async function connect() {
+  if (!navigator.bluetooth) { alert("Bluetooth needs Chrome on Android, opened from an https:// link."); return; }
+  try {
+    device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE] }] });
+    device.addEventListener("gattserverdisconnected", () => { setConnected(false); cmdChar = null; });
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SERVICE);
+    cmdChar = await svc.getCharacteristic(CMD);
+    frameChar = await svc.getCharacteristic(FRAME);
+    const st = await svc.getCharacteristic(STATUS);
+    await st.startNotifications();
+    st.addEventListener("characteristicvaluechanged", e => onStatus(new TextDecoder().decode(e.target.value)));
+    setConnected(true);
+    syncClock();
+    send("F:happy");
+  } catch (e) { console.log(e); if (e.name !== "NotFoundError") alert("Connect failed: " + e.message); }
+}
+
+function send(cmd) {
+  if (!cmdChar) { flash("Connect the robot first"); return Promise.resolve(); }
+  chain = chain.then(() => cmdChar.writeValueWithResponse(enc.encode(cmd))).catch(e => console.log("write", e));
+  return chain;
+}
+
+// OLED font is plain ASCII: swap smart quotes etc., drop the rest
+function oledText(s) {
+  return s.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"').replace(/[\u2013\u2014]/g, "-")
+          .replace(/\u2026/g, "...").replace(/[^\x20-\x7E\n]/g, "").trim();
+}
+
+function showText(s) {                       // long text -> C / A:part ... / S
+  s = oledText(s);
+  if (s.length <= 180) return send("M:" + s);
+  send("C");
+  for (let i = 0; i < s.length; i += 180) send("A:" + s.slice(i, i + 180));
+  return send("S");
+}
+
+function syncClock() {
+  const d = new Date();
+  const local = Math.floor(d.getTime() / 1000) - d.getTimezoneOffset() * 60;
+  send("T:" + local);
+}
+
+function onStatus(s) {
+  if (s === "TIMER_DONE") { say("Time's up!"); if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]); }
+}
+
+// ---------------------------------------------------------------- UI
+const FACES = [["happy","😊"],["sad","😢"],["angry","😠"],["love","😍"],["sleepy","😴"],
+               ["surprised","😲"],["wink","😉"],["think","🤔"],["neutral","🙂"]];
+const facesEl = document.getElementById("faces");
+for (const [name, emo] of FACES) {
+  const b = document.createElement("button");
+  b.className = "face"; b.innerHTML = `<span>${emo}</span>${name}`;
+  b.onclick = () => send("F:" + name);
+  facesEl.appendChild(b);
+}
+document.querySelectorAll("[data-cmd]").forEach(b => b.onclick = () => { if (b.dataset.cmd === "K") syncClock(); send(b.dataset.cmd); });
+document.querySelectorAll("[data-timer]").forEach(b => b.onclick = () => send("TM:" + b.dataset.timer));
+document.getElementById("timerGo").onclick = () => {
+  const m = parseFloat(document.getElementById("timerMin").value);
+  if (m > 0) send("TM:" + Math.round(m * 60));
+};
+document.getElementById("msgSend").onclick = () => { const t = document.getElementById("msgText").value; if (t.trim()) showText(t); };
+document.getElementById("connectBtn").onclick = connect;
+
+function flash(t) { document.getElementById("heard").textContent = t; }
+function addLog(who, text) {
+  const d = document.createElement("div"); d.className = "msg " + who; d.textContent = text;
+  const log = document.getElementById("log"); log.appendChild(d); log.scrollTop = log.scrollHeight;
+}
+
+// ---------------------------------------------------------------- AI (Claude API)
+const keyEl = document.getElementById("apiKey"), speakEl = document.getElementById("speakOn");
+try { keyEl.value = localStorage.getItem("rb_key") || ""; speakEl.checked = localStorage.getItem("rb_speak") !== "0"; } catch (e) {}
+document.getElementById("saveKey").onclick = () => {
+  try { localStorage.setItem("rb_key", keyEl.value.trim()); localStorage.setItem("rb_speak", speakEl.checked ? "1" : "0"); } catch (e) {}
+  flash("AI settings saved");
+};
+
+const SYSTEM = `You are Robonauts, a cheerful little robot assistant made by Robonauts Ltd in Bangladesh.
+Your words appear on a tiny 128x64 OLED screen (21 characters x 6 lines) and are spoken aloud.
+Reply in English with at most 2 short sentences (under 200 characters), plain text only, no emoji or markdown.
+Respond ONLY with JSON: {"face":"<one of happy,sad,angry,love,sleepy,surprised,wink,think,neutral>","text":"<your reply>"}`;
+
+async function askAI(question) {
+  addLog("me", question);
+  const key = keyEl.value.trim();
+  if (!key) { addLog("bot", "Add your Claude API key in AI settings first."); return; }
+  send("W");                                            // thinking animation on the robot
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": key,
+                 "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+      body: JSON.stringify({ model: "claude-haiku-5-5", max_tokens: 200, system: SYSTEM,
+                             messages: [{ role: "user", content: question }] })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error ? data.error.message : r.status);
+    const raw = data.content.map(c => c.text || "").join("");
+    let face = "happy", text = raw;
+    try { const j = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1)); face = j.face || face; text = j.text || raw; } catch (e) {}
+    addLog("bot", text);
+    send("F:" + face);
+    setTimeout(() => showText(text), 1200);             // show the face briefly, then the answer
+    say(text);
+  } catch (e) {
+    addLog("bot", "AI error: " + e.message);
+    send("F:sad");
+  }
+}
+document.getElementById("askBtn").onclick = () => { const el = document.getElementById("askText"); if (el.value.trim()) { askAI(el.value.trim()); el.value = ""; } };
+document.getElementById("askText").addEventListener("keydown", e => { if (e.key === "Enter") document.getElementById("askBtn").click(); });
+
+function say(text) {
+  if (!speakEl.checked || !window.speechSynthesis) return;
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text); u.lang = "en-US"; u.rate = 1.05; u.pitch = 1.3;
+  speechSynthesis.speak(u);
+}
+
+// ---------------------------------------------------------------- voice commands
+const WORDS = { one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9, ten:10, fifteen:15, twenty:20, thirty:30 };
+function handleVoice(t) {
+  const s = t.toLowerCase().trim();
+  flash("“" + t + "”");
+  const face = FACES.map(f => f[0]).find(f => s.includes(f) || (f === "think" && s.includes("thinking")));
+  if (face && /(face|look|be|feel|show|make)/.test(s)) { send("F:" + face); say("Okay!"); return; }
+  if (/(cancel|stop).*timer/.test(s)) { send("TM:0"); say("Timer cancelled"); return; }
+  const tm = s.match(/timer.*?(\d+|\w+)\s*(second|minute|hour)|(\d+|\w+)\s*(second|minute|hour).*timer/);
+  if (tm) {
+    const n = tm[1] || tm[3], unit = tm[2] || tm[4];
+    const v = isNaN(n) ? WORDS[n] : parseInt(n);
+    if (v) { const sec = v * (unit.startsWith("hour") ? 3600 : unit.startsWith("minute") ? 60 : 1);
+             send("TM:" + sec); say(`Timer for ${v} ${unit}${v > 1 ? "s" : ""}`); return; }
+  }
+  if (/(what time|the time|clock)/.test(s)) {
+    syncClock(); send("K");
+    say("It's " + new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })); return;
+  }
+  const m = s.match(/^(show|say|display|write)\s+(message\s+)?(.+)/);
+  if (m) { showText(t.split(/\s+/).slice(m[2] ? 2 : 1).join(" ")); return; }
+  askAI(t);                                              // anything else -> ask the AI
+}
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const micBtn = document.getElementById("mic");
+micBtn.onclick = () => {
+  if (!SR) { alert("Voice needs Chrome on Android."); return; }
+  const rec = new SR(); rec.lang = "en-US"; rec.interimResults = true; rec.maxAlternatives = 1;
+  micBtn.classList.add("listening"); flash("Listening...");
+  rec.onresult = e => {
+    const r = e.results[e.results.length - 1];
+    flash(r[0].transcript);
+    if (r.isFinal) handleVoice(r[0].transcript);
+  };
+  rec.onerror = e => flash("Mic error: " + e.error);
+  rec.onend = () => micBtn.classList.remove("listening");
+  rec.start();
+};
+</script>
+</body>
+</html>
