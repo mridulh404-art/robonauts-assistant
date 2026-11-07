@@ -77,6 +77,19 @@
   </section>
 
   <section>
+    <h2>Songs (OLED music show)</h2>
+    <p><small>Pick a song's .mp3 and its .rbf.gz frame file together (made with export_frames.py). They stay saved on this phone.</small></p>
+    <input id="songFiles" type="file" multiple accept=".mp3,.gz,audio/*,application/gzip">
+    <div id="songList" style="margin-top:8px"></div>
+    <canvas id="preview" width="128" height="64" style="width:100%;image-rendering:pixelated;background:#000;border:2px solid var(--gold);border-radius:8px;margin-top:8px"></canvas>
+    <div class="row" style="align-items:center">
+      <button id="songStop">Stop</button>
+      <small id="songInfo" style="flex:2;text-align:right">No song playing</small>
+    </div>
+    <audio id="player" preload="auto"></audio>
+  </section>
+
+  <section>
     <h2>Ask Robonauts (AI)</h2>
     <div id="log"></div>
     <div class="row">
@@ -138,8 +151,8 @@ function send(cmd) {
 
 // OLED font is plain ASCII: swap smart quotes etc., drop the rest
 function oledText(s) {
-  return s.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"').replace(/[\u2013\u2014]/g, "-")
-          .replace(/\u2026/g, "...").replace(/[^\x20-\x7E\n]/g, "").trim();
+  return s.replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/[–—]/g, "-")
+          .replace(/…/g, "...").replace(/[^\x20-\x7E\n]/g, "").trim();
 }
 
 function showText(s) {                       // long text -> C / A:part ... / S
@@ -274,6 +287,135 @@ micBtn.onclick = () => {
   rec.onend = () => micBtn.classList.remove("listening");
   rec.start();
 };
+
+// ---------------------------------------------------------------- songs: play mp3 + stream frames
+const player = document.getElementById("player");
+const pctx = document.getElementById("preview").getContext("2d");
+let songs = {};                    // name -> {mp3: Blob, rbf: Blob}
+let show = null;                   // {fps, count, frames: Uint8Array}
+let streaming = false, chunk = 500, sentFrames = 0, statT = 0;
+
+function dbOpen() {
+  return new Promise((ok, bad) => {
+    const r = indexedDB.open("robonauts", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("songs");
+    r.onsuccess = () => ok(r.result); r.onerror = () => bad(r.error);
+  });
+}
+async function dbSave(name, rec) {
+  try { const db = await dbOpen(); db.transaction("songs", "readwrite").objectStore("songs").put(rec, name); } catch (e) { console.log(e); }
+}
+async function dbLoadAll() {
+  try {
+    const db = await dbOpen();
+    const st = db.transaction("songs").objectStore("songs");
+    const keys = await new Promise(ok => { const r = st.getAllKeys(); r.onsuccess = () => ok(r.result); });
+    const vals = await new Promise(ok => { const r = st.getAll(); r.onsuccess = () => ok(r.result); });
+    keys.forEach((k, i) => songs[k] = vals[i]);
+  } catch (e) { console.log(e); }
+  renderSongs();
+}
+async function dbDelete(name) {
+  try { const db = await dbOpen(); db.transaction("songs", "readwrite").objectStore("songs").delete(name); } catch (e) {}
+}
+
+const baseName = f => f.name.replace(/\.rbf\.gz$/i, "").replace(/\.mp3$/i, "");
+document.getElementById("songFiles").onchange = async e => {
+  for (const f of e.target.files) {
+    const n = baseName(f);
+    songs[n] = songs[n] || {};
+    if (/\.gz$/i.test(f.name)) songs[n].rbf = f; else songs[n].mp3 = f;
+  }
+  for (const [n, rec] of Object.entries(songs)) if (rec.mp3 && rec.rbf) await dbSave(n, rec);
+  e.target.value = "";
+  renderSongs();
+};
+
+function renderSongs() {
+  const el = document.getElementById("songList"); el.innerHTML = "";
+  for (const [n, rec] of Object.entries(songs)) {
+    const row = document.createElement("div"); row.className = "row";
+    const b = document.createElement("button"); b.style.flex = "3";
+    b.textContent = "▶ " + n.replace(/_/g, " ") + (rec.mp3 && rec.rbf ? "" : rec.mp3 ? "  (needs .rbf.gz)" : "  (needs .mp3)");
+    b.disabled = !(rec.mp3 && rec.rbf);
+    b.onclick = () => playSong(n);
+    const x = document.createElement("button"); x.textContent = "✕";
+    x.onclick = () => { delete songs[n]; dbDelete(n); renderSongs(); };
+    row.append(b, x); el.appendChild(row);
+  }
+}
+
+async function loadFrames(blob) {
+  const buf = new Uint8Array(await new Response(blob.stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
+  if (String.fromCharCode(...buf.slice(0, 4)) !== "RBF1") throw new Error("not a Robonauts frame file");
+  const fps = buf[4], count = new DataView(buf.buffer).getUint32(5, true);
+  return { fps, count, frames: buf.subarray(9) };
+}
+
+function drawPreview(f) {                   // SSD1306 page layout -> canvas
+  const img = pctx.createImageData(128, 64);
+  for (let page = 0; page < 8; page++)
+    for (let x = 0; x < 128; x++) {
+      const b = f[page * 128 + x];
+      for (let bit = 0; bit < 8; bit++) {
+        const i = ((page * 8 + bit) * 128 + x) * 4, on = (b >> bit) & 1;
+        img.data[i] = on ? 210 : 0; img.data[i + 1] = on ? 235 : 0; img.data[i + 2] = on ? 255 : 0; img.data[i + 3] = 255;
+      }
+    }
+  pctx.putImageData(img, 0, 0);
+}
+
+async function writeFrame(f) {              // 2-byte offset + data, chunk size adapts to the link
+  for (let off = 0; off < 1024; ) {
+    const len = Math.min(chunk, 1024 - off);
+    const pkt = new Uint8Array(len + 2);
+    pkt[0] = off >> 8; pkt[1] = off & 255; pkt.set(f.subarray(off, off + len), 2);
+    try { await frameChar.writeValueWithoutResponse(pkt); off += len; }
+    catch (e) {
+      if (chunk > 20) { chunk = chunk > 180 ? 180 : 20; console.log("chunk ->", chunk); }
+      else throw e;
+    }
+  }
+}
+
+async function playSong(name) {
+  stopSong();
+  const rec = songs[name];
+  try { show = await loadFrames(rec.rbf); } catch (e) { alert("Frame file error: " + e.message); return; }
+  player.src = URL.createObjectURL(rec.mp3);
+  await player.play();
+  streaming = true; sentFrames = 0; statT = performance.now();
+  let last = -1;
+  document.getElementById("songInfo").textContent = name.replace(/_/g, " ");
+  while (streaming && !player.ended) {
+    const idx = Math.min(show.count - 1, Math.floor(player.currentTime * show.fps));
+    if (idx !== last) {
+      last = idx;
+      const f = show.frames.subarray(idx * 1024, idx * 1024 + 1024);
+      drawPreview(f);
+      if (frameChar) {
+        const job = chain.then(() => writeFrame(f));   // never overlap with command writes
+        chain = job.catch(() => {});
+        try { await job; sentFrames++; } catch (e) { console.log("frame", e); }
+      }
+      const dt = (performance.now() - statT) / 1000;
+      if (dt > 2) {
+        document.getElementById("songInfo").textContent =
+          `${name.replace(/_/g, " ")} - ${(sentFrames / dt).toFixed(1)} fps to robot (chunk ${chunk})`;
+        sentFrames = 0; statT = performance.now();
+      }
+    } else await new Promise(r => setTimeout(r, 8));
+  }
+  streaming = false;
+}
+
+function stopSong() {
+  streaming = false;
+  player.pause();
+  document.getElementById("songInfo").textContent = "No song playing";
+}
+document.getElementById("songStop").onclick = stopSong;
+dbLoadAll();
 </script>
 </body>
 </html>
