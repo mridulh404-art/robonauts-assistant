@@ -33,7 +33,7 @@ It runs on its own from a power bank. A phone web dashboard controls it over Blu
 
 The dashboard has **controls only**. Everything is shown on the robot's OLED, not on the phone.
 
-<p align="center"><img src="images/dashboard.jpg" width="300" alt="Phone dashboard"></p>
+<p align="center"><img src="dashboard.jpg" width="300" alt="Phone dashboard"></p>
 <p align="center"><i>The phone dashboard: controls only. The output appears on the robot.</i></p>
 
 ---
@@ -105,7 +105,7 @@ sequenceDiagram
 
 ### Circuit diagram
 
-<p align="center"><img src="images/circuit.svg" width="100%" alt="Circuit diagram: ESP32, OLED, L298N, motors"></p>
+<p align="center"><img src="circuit.svg" width="100%" alt="Circuit diagram: ESP32, OLED, L298N, motors"></p>
 
 ### Wiring: OLED
 
