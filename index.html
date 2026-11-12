@@ -38,6 +38,9 @@
   #heard { text-align:center; color:var(--muted); font-size:14px; min-height:20px; margin:4px 0 10px; }
   small { color:var(--muted); }
   details summary { cursor:pointer; color:var(--muted); }
+  #jumpBtn { width:100%; height:120px; font-size:30px; font-weight:800; border-radius:20px; touch-action:manipulation; user-select:none; }
+  #gameScore { text-align:center; font-size:16px; margin-top:8px; color:var(--gold); min-height:22px; }
+  select { font:inherit; color:var(--text); background:#14213D; border:1px solid #2f426e; border-radius:12px; padding:12px; }
 </style>
 </head>
 <body>
@@ -77,6 +80,41 @@
   </section>
 
   <section>
+    <h2>Game: Robo Runner</h2>
+    <p><small>The game plays on the robot's screen. Tap JUMP to jump over blocks and low birds. Stay down for high birds. The BOOT button on the ESP32 also jumps, so it works without the phone.</small></p>
+    <div class="row">
+      <button id="gameStart" class="primary">▶ Start game</button>
+      <button id="gameStop">■ Stop</button>
+    </div>
+    <div class="row"><button id="jumpBtn" class="primary">JUMP</button></div>
+    <div id="gameScore">Score - | Best -</div>
+  </section>
+
+  <section>
+    <h2>AI animations (OpenAI)</h2>
+    <textarea id="aiPrompt" placeholder="Describe it, e.g. a rocket flying past the moon, a bouncing heart, a robot waving"></textarea>
+    <div class="row">
+      <button id="aiShapes" class="primary">✨ Animate (shapes)</button>
+      <button id="aiPicture" class="primary">🖼 AI picture</button>
+    </div>
+    <div class="row" style="align-items:center">
+      <small style="flex:1">Picture style</small>
+      <select id="aiStyle" style="flex:2"><option value="line">Line art (sharp)</option><option value="dither">Photo (dotted)</option></select>
+    </div>
+    <div class="row"><button id="aiStop">Stop</button></div>
+    <p><small id="aiInfo">Made animations are saved on this phone, so they replay with no internet.</small></p>
+    <div id="aiList"></div>
+    <details style="margin-top:10px">
+      <summary>OpenAI settings</summary>
+      <p><small>OpenAI API key from platform.openai.com. It is stored only on this phone.</small></p>
+      <input id="oaiKey" type="password" placeholder="sk-...">
+      <div class="row" style="align-items:center"><small style="flex:1">Text model</small><input id="oaiChatModel" style="flex:2" value="gpt-5-mini"></div>
+      <div class="row" style="align-items:center"><small style="flex:1">Image model</small><input id="oaiImgModel" style="flex:2" value="gpt-image-1-mini"></div>
+      <div class="row"><button id="oaiSave">Save</button></div>
+    </details>
+  </section>
+
+  <section>
     <h2>Animations</h2>
     <div class="grid" id="animList"><small>Loading animations...</small></div>
     <div class="row"><button id="animStop">Stop animation</button></div>
@@ -87,7 +125,6 @@
     <p><small>Pick a song's .mp3 and its .rbf.gz frame file together (made with export_frames.py). They stay saved on this phone.</small></p>
     <input id="songFiles" type="file" multiple accept=".mp3,.gz,audio/*,application/gzip">
     <div id="songList" style="margin-top:8px"></div>
-    <canvas id="preview" width="128" height="64" style="width:100%;image-rendering:pixelated;background:#000;border:2px solid var(--gold);border-radius:8px;margin-top:8px"></canvas>
     <div class="row" style="align-items:center">
       <button id="songStop">Stop</button>
       <small id="songInfo" style="flex:2;text-align:right">No song playing</small>
@@ -207,6 +244,13 @@ function onStatus(s) {
     document.getElementById("sleepH").value = sh; document.getElementById("wakeH").value = wh;
     return;
   }
+  if (s.startsWith("GAME:") || s.startsWith("GAME_OVER:")) {
+    const over = s.startsWith("GAME_OVER:");
+    const [sc, best] = s.slice(over ? 10 : 5).split(",");
+    document.getElementById("gameScore").textContent = (over ? "Game over! " : "") + `Score ${sc} | Best ${best}`;
+    if (over && navigator.vibrate) navigator.vibrate(200);
+    return;
+  }
   if (s === "TIMER_DONE") { say("Time's up!"); if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]); }
 }
 
@@ -251,9 +295,12 @@ Respond ONLY with JSON: {"face":"<one of happy,sad,angry,love,sleepy,surprised,w
 async function askAI(question) {
   addLog("me", question);
   const key = keyEl.value.trim();
-  if (!key) { addLog("bot", "Add your Claude API key in AI settings first."); return; }
+  if (!key && !oaiKey()) { addLog("bot", "Add a Claude key (AI settings) or an OpenAI key (OpenAI settings) first."); return; }
   send("W");                                            // thinking animation on the robot
   try {
+    let raw;
+    if (!key) raw = await openaiChat(SYSTEM, question);  // no Claude key -> use OpenAI
+    else {
     const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json", "x-api-key": key,
@@ -263,7 +310,8 @@ async function askAI(question) {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error ? data.error.message : r.status);
-    const raw = data.content.map(c => c.text || "").join("");
+    raw = data.content.map(c => c.text || "").join("");
+    }
     let face = "happy", text = raw;
     try { const j = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1)); face = j.face || face; text = j.text || raw; } catch (e) {}
     addLog("bot", text);
@@ -304,6 +352,11 @@ function handleVoice(t) {
     syncClock(); send("K");
     say("It's " + new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })); return;
   }
+  if (/(play|start).*(game|runner)/.test(s)) { send("G:start"); say("Let's play! Tap jump."); return; }
+  if (/(stop|end).*game/.test(s)) { send("G:stop"); return; }
+  const an = t.match(/^(animate|draw|picture of|make a picture of)\s+(.+)/i);
+  if (an) { document.getElementById("aiPrompt").value = an[2];
+            (an[1].toLowerCase() === "animate" ? makeShapesAnim : makePictureAnim)(an[2]); return; }
   const m = s.match(/^(show|say|display|write)\s+(message\s+)?(.+)/);
   if (m) { showText(t.split(/\s+/).slice(m[2] ? 2 : 1).join(" ")); return; }
   askAI(t);                                              // anything else -> ask the AI
@@ -327,15 +380,14 @@ micBtn.onclick = () => {
 
 // ---------------------------------------------------------------- songs: play mp3 + stream frames
 const player = document.getElementById("player");
-const pctx = document.getElementById("preview").getContext("2d");
 let songs = {};                    // name -> {mp3: Blob, rbf: Blob}
 let show = null;                   // {fps, count, frames: Uint8Array}
 let streaming = false, chunk = 500, sentFrames = 0, statT = 0;
 
 function dbOpen() {
   return new Promise((ok, bad) => {
-    const r = indexedDB.open("robonauts", 1);
-    r.onupgradeneeded = () => r.result.createObjectStore("songs");
+    const r = indexedDB.open("robonauts", 2);
+    r.onupgradeneeded = () => { for (const n of ["songs", "ai"]) if (!r.result.objectStoreNames.contains(n)) r.result.createObjectStore(n); };
     r.onsuccess = () => ok(r.result); r.onerror = () => bad(r.error);
   });
 }
@@ -389,19 +441,6 @@ async function loadFrames(blob) {
   return { fps, count, frames: buf.subarray(9) };
 }
 
-function drawPreview(f) {                   // SSD1306 page layout -> canvas
-  const img = pctx.createImageData(128, 64);
-  for (let page = 0; page < 8; page++)
-    for (let x = 0; x < 128; x++) {
-      const b = f[page * 128 + x];
-      for (let bit = 0; bit < 8; bit++) {
-        const i = ((page * 8 + bit) * 128 + x) * 4, on = (b >> bit) & 1;
-        img.data[i] = on ? 210 : 0; img.data[i + 1] = on ? 235 : 0; img.data[i + 2] = on ? 255 : 0; img.data[i + 3] = 255;
-      }
-    }
-  pctx.putImageData(img, 0, 0);
-}
-
 async function writeFrame(f) {              // 2-byte offset + data, chunk size adapts to the link
   for (let off = 0; off < 1024; ) {
     const len = Math.min(chunk, 1024 - off);
@@ -430,7 +469,6 @@ async function playSong(name) {
     if (idx !== last) {
       last = idx;
       const f = show.frames.subarray(idx * 1024, idx * 1024 + 1024);
-      drawPreview(f);
       if (frameChar) {
         const job = chain.then(() => writeFrame(f));   // never overlap with command writes
         chain = job.catch(() => {});
@@ -496,7 +534,6 @@ async function playAnim(i) {
     if (idx !== last) {
       last = idx;
       const f = a.frames.subarray(idx * 1024, idx * 1024 + 1024);
-      drawPreview(f);
       if (frameChar && !onRobot) {
         const job = chain.then(() => writeFrame(f));
         chain = job.catch(() => {});
@@ -522,6 +559,267 @@ document.getElementById("sleepSave").onclick = () => {
 document.getElementById("autoOn").onclick = () => { send("AUTO:1"); send("INFO"); };
 document.getElementById("autoOff").onclick = () => { send("AUTO:0"); send("INFO"); };
 document.getElementById("infoBtn").onclick = () => send("INFO");
+
+// ---------------------------------------------------------------- Robo Runner game (runs on the robot)
+document.getElementById("gameStart").onclick = () => { stopSong(); send("G:start"); };
+document.getElementById("gameStop").onclick = () => send("G:stop");
+const jumpBtn = document.getElementById("jumpBtn");
+jumpBtn.addEventListener("pointerdown", e => {          // pointerdown = no click delay
+  e.preventDefault();
+  if (navigator.vibrate) navigator.vibrate(15);
+  send("G:jump");
+});
+jumpBtn.addEventListener("contextmenu", e => e.preventDefault());
+
+// ---------------------------------------------------------------- OpenAI
+const oaiKeyEl = document.getElementById("oaiKey"), oaiChatEl = document.getElementById("oaiChatModel"), oaiImgEl = document.getElementById("oaiImgModel");
+try {
+  oaiKeyEl.value = localStorage.getItem("rb_oai") || "";
+  oaiChatEl.value = localStorage.getItem("rb_oai_chat") || oaiChatEl.value;
+  oaiImgEl.value = localStorage.getItem("rb_oai_img") || oaiImgEl.value;
+} catch (e) {}
+document.getElementById("oaiSave").onclick = () => {
+  try {
+    localStorage.setItem("rb_oai", oaiKeyEl.value.trim());
+    localStorage.setItem("rb_oai_chat", oaiChatEl.value.trim());
+    localStorage.setItem("rb_oai_img", oaiImgEl.value.trim());
+  } catch (e) {}
+  flash("OpenAI settings saved");
+};
+const oaiKey = () => oaiKeyEl.value.trim();
+
+async function openaiChat(system, user, json) {
+  const body = { model: oaiChatEl.value.trim() || "gpt-5-mini", max_completion_tokens: 8000,
+                 messages: [{ role: "system", content: system }, { role: "user", content: user }] };
+  if (json) body.response_format = { type: "json_object" };
+  const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST", headers: { "content-type": "application/json", "authorization": "Bearer " + oaiKey() },
+    body: JSON.stringify(body) });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error ? data.error.message : "HTTP " + r.status);
+  return data.choices[0].message.content || "";
+}
+
+async function openaiImage(prompt) {
+  const r = await fetch("https://api.openai.com/v1/images/generations", {
+    method: "POST", headers: { "content-type": "application/json", "authorization": "Bearer " + oaiKey() },
+    body: JSON.stringify({ model: oaiImgEl.value.trim() || "gpt-image-1-mini", prompt, n: 1, size: "1536x1024", quality: "low" }) });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error ? data.error.message : "HTTP " + r.status);
+  const d = data.data[0];
+  return d.b64_json ? "data:image/png;base64," + d.b64_json : d.url;
+}
+
+// ---------------------------------------------------------------- 128x64 off-screen renderer (never shown on the phone)
+const oled = document.createElement("canvas"); oled.width = 128; oled.height = 64;
+const octx = oled.getContext("2d", { willReadFrequently: true });
+
+function packFrame(threshold = 128) {        // canvas -> SSD1306 page bytes (1024)
+  const px = octx.getImageData(0, 0, 128, 64).data, f = new Uint8Array(1024);
+  for (let y = 0; y < 64; y++)
+    for (let x = 0; x < 128; x++)
+      if (px[(y * 128 + x) * 4] >= threshold) f[(y >> 3) * 128 + x] |= 1 << (y & 7);
+  return f;
+}
+
+// ---- mode 1: AI writes a shapes script, the phone draws it frame by frame
+const SHAPES_SYSTEM = `You design short looping animations for a tiny 128x64 pixel monochrome OLED (white on black).
+Return ONLY a JSON object:
+{"title":"<2-3 words>","fps":<8-12>,"seconds":<2-5>,"objects":[ ... ]}
+Each object: {"type":"circle|rect|line|triangle|star|heart|text", ...base props, "keys":[{"t":0..1, ...props}]}
+Props (numbers, pixels): x,y = centre (line: start), r = radius/size, w,h = rect size, x2,y2 = line end,
+a = rotation degrees, s = scale, lw = line width (>=2), fill = true/false, on = 1 visible / 0 hidden, text,size(1-3) for text.
+"keys" are keyframes over one loop (t from 0 to 1); props between keys are smoothly interpolated. The first and last key should match so it loops.
+Rules: 3 to 8 objects, keep everything inside 0..127 x 0..63 (y=0 is top), bold simple shapes, max 1 short text (<=10 chars), no gradients.`;
+
+const lerp = (a, b, k) => a + (b - a) * k;
+function propsAt(o, t) {
+  const p = { ...o }, keys = (o.keys || []).slice().sort((a, b) => a.t - b.t);
+  if (!keys.length) return p;
+  for (const name of new Set(keys.flatMap(k => Object.keys(k)))) {
+    if (name === "t") continue;
+    const ks = keys.filter(k => k[name] !== undefined);
+    if (!ks.length) continue;
+    if (typeof ks[0][name] !== "number") { p[name] = ks.filter(k => k.t <= t).pop()?.[name] ?? ks[0][name]; continue; }
+    if (t <= ks[0].t) { p[name] = ks[0][name]; continue; }
+    if (t >= ks[ks.length - 1].t) { p[name] = ks[ks.length - 1][name]; continue; }
+    for (let i = 0; i < ks.length - 1; i++)
+      if (t >= ks[i].t && t <= ks[i + 1].t) {
+        let k = (t - ks[i].t) / Math.max(1e-6, ks[i + 1].t - ks[i].t);
+        k = k * k * (3 - 2 * k);                           // ease in-out
+        p[name] = lerp(ks[i][name], ks[i + 1][name], k); break;
+      }
+  }
+  return p;
+}
+function drawObject(p) {
+  if (p.on === 0 || p.on === false) return;
+  const n = (v, d) => (typeof v === "number" && isFinite(v) ? v : d);
+  const x = n(p.x, 64), y = n(p.y, 32), r = n(p.r, 8), fill = p.fill !== false;
+  octx.save();
+  octx.lineWidth = Math.max(1, n(p.lw, 2)); octx.strokeStyle = octx.fillStyle = "#fff";
+  if (p.type === "line") {
+    octx.lineCap = "round"; octx.beginPath(); octx.moveTo(x, y); octx.lineTo(n(p.x2, x + 20), n(p.y2, y)); octx.stroke();
+    octx.restore(); return;
+  }
+  octx.translate(x, y); octx.rotate(n(p.a, 0) * Math.PI / 180); const sc = n(p.s, 1); octx.scale(sc, sc);
+  octx.beginPath();
+  switch (p.type) {
+    case "rect": { const w = n(p.w, 16), h = n(p.h, 10); octx.rect(-w / 2, -h / 2, w, h); break; }
+    case "triangle": octx.moveTo(0, -r); octx.lineTo(r * 0.87, r * 0.5); octx.lineTo(-r * 0.87, r * 0.5); octx.closePath(); break;
+    case "star": for (let i = 0; i < 10; i++) { const rr = i % 2 ? r * 0.45 : r, an = -Math.PI / 2 + i * Math.PI / 5;
+                   octx.lineTo(Math.cos(an) * rr, Math.sin(an) * rr); } octx.closePath(); break;
+    case "heart": octx.moveTo(0, r * 0.9);
+                  octx.bezierCurveTo(-r * 1.3, -r * 0.1, -r * 0.6, -r * 1.1, 0, -r * 0.4);
+                  octx.bezierCurveTo(r * 0.6, -r * 1.1, r * 1.3, -r * 0.1, 0, r * 0.9); break;
+    case "text": { const sz = Math.min(3, Math.max(1, Math.round(n(p.size, 2))));
+                   octx.font = `bold ${sz * 9}px monospace`; octx.textAlign = "center"; octx.textBaseline = "middle";
+                   octx.fillText(String(p.text || "").slice(0, 12), 0, 0); octx.restore(); return; }
+    default: octx.arc(0, 0, Math.max(1, r), 0, Math.PI * 2);
+  }
+  fill ? octx.fill() : octx.stroke();
+  octx.restore();
+}
+function renderShapes(spec) {
+  const fps = Math.min(15, Math.max(4, spec.fps | 0 || 10));
+  const count = Math.min(75, Math.max(8, Math.round(fps * Math.min(6, Math.max(1, +spec.seconds || 3)))));
+  const objs = (spec.objects || []).slice(0, 12), frames = [];
+  for (let i = 0; i < count; i++) {
+    octx.fillStyle = "#000"; octx.fillRect(0, 0, 128, 64);
+    for (const o of objs) drawObject(propsAt(o, i / count));
+    frames.push(packFrame());
+  }
+  return { title: String(spec.title || "AI animation").slice(0, 24), fps, frames };
+}
+
+// ---- mode 2: AI picture -> 1-bit -> slow zoom/pan ("Ken Burns") animation
+function loadImage(src) {
+  return new Promise((ok, bad) => { const im = new Image(); im.crossOrigin = "anonymous"; im.onload = () => ok(im); im.onerror = () => bad(new Error("image load failed")); im.src = src; });
+}
+function toMono(style) {                     // grayscale -> line art threshold or Floyd-Steinberg dither
+  const id = octx.getImageData(0, 0, 128, 64), d = id.data, g = new Float32Array(128 * 64);
+  let sum = 0;
+  for (let i = 0; i < g.length; i++) { g[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2]; sum += g[i]; }
+  if (sum / g.length > 127) for (let i = 0; i < g.length; i++) g[i] = 255 - g[i];   // keep the background black
+  if (style === "dither") {
+    for (let y = 0; y < 64; y++) for (let x = 0; x < 128; x++) {
+      const i = y * 128 + x, v = g[i] >= 128 ? 255 : 0, e = g[i] - v; g[i] = v;
+      if (x < 127) g[i + 1] += e * 7 / 16;
+      if (y < 63) { if (x > 0) g[i + 127] += e * 3 / 16; g[i + 128] += e * 5 / 16; if (x < 127) g[i + 129] += e / 16; }
+    }
+  } else {                                   // Otsu threshold: best split between dark and bright
+    const hist = new Array(256).fill(0); for (const v of g) hist[Math.max(0, Math.min(255, v | 0))]++;
+    let tot = g.length, sumAll = 0; for (let i = 0; i < 256; i++) sumAll += i * hist[i];
+    let wB = 0, sumB = 0, best = 0, th = 128;
+    for (let i = 0; i < 256; i++) {
+      wB += hist[i]; if (!wB) continue; const wF = tot - wB; if (!wF) break;
+      sumB += i * hist[i]; const mB = sumB / wB, mF = (sumAll - sumB) / wF, between = wB * wF * (mB - mF) ** 2;
+      if (between > best) { best = between; th = i; }
+    }
+    for (let i = 0; i < g.length; i++) g[i] = g[i] > th ? 255 : 0;
+  }
+  for (let i = 0; i < g.length; i++) d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = g[i];
+  octx.putImageData(id, 0, 0);
+}
+function renderPicture(img, style, title) {
+  const fps = 10, count = 40, frames = [];
+  const W = img.naturalWidth, H = img.naturalHeight;
+  octx.imageSmoothingEnabled = true; octx.imageSmoothingQuality = "high";
+  for (let i = 0; i < count; i++) {
+    const k = 0.5 - 0.5 * Math.cos(i / count * Math.PI * 2);   // 0 -> 1 -> 0, loops smoothly
+    const zoom = 1 + 0.25 * k;
+    let sw = W / zoom, sh = sw / 2; if (sh > H) { sh = H / zoom; sw = sh * 2; }
+    const sx = (W - sw) / 2 + (W - sw) * 0.3 * (k - 0.5), sy = (H - sh) / 2;
+    octx.fillStyle = "#000"; octx.fillRect(0, 0, 128, 64);
+    octx.drawImage(img, Math.max(0, sx), Math.max(0, sy), sw, sh, 0, 0, 128, 64);
+    toMono(style);
+    frames.push(packFrame());
+  }
+  return { title, fps, frames };
+}
+
+// ---------------------------------------------------------------- stream any frame list to the robot (loops until stopped)
+async function playFrames(a) {
+  stopSong();
+  const run = ++animRun, t0 = performance.now();
+  let last = -1;
+  aiInfo("Playing on robot: " + a.title);
+  while (run === animRun) {
+    const idx = Math.floor((performance.now() - t0) / 1000 * a.fps) % a.frames.length;
+    if (idx !== last) {
+      last = idx;
+      if (!frameChar) { aiInfo("Connect the robot to play it"); return; }
+      const job = chain.then(() => writeFrame(a.frames[idx]));
+      chain = job.catch(() => {});
+      try { await job; } catch (e) { console.log("ai frame", e); }
+    } else await new Promise(r => setTimeout(r, 8));
+  }
+}
+const aiInfo = t => document.getElementById("aiInfo").textContent = t;
+
+// ---------------------------------------------------------------- saved AI animations (IndexedDB, offline replay)
+let aiSaved = {};
+async function aiSave(a) {
+  const key = Date.now() + "_" + a.title, flat = new Uint8Array(a.frames.length * 1024);
+  a.frames.forEach((f, i) => flat.set(f, i * 1024));
+  aiSaved[key] = { title: a.title, fps: a.fps, flat };
+  try { const db = await dbOpen(); db.transaction("ai", "readwrite").objectStore("ai").put(aiSaved[key], key); } catch (e) { console.log(e); }
+  renderAiList();
+}
+async function aiLoadAll() {
+  try {
+    const db = await dbOpen(), st = db.transaction("ai").objectStore("ai");
+    const keys = await new Promise(ok => { const r = st.getAllKeys(); r.onsuccess = () => ok(r.result); });
+    const vals = await new Promise(ok => { const r = st.getAll(); r.onsuccess = () => ok(r.result); });
+    keys.forEach((k, i) => aiSaved[k] = vals[i]);
+  } catch (e) { console.log(e); }
+  renderAiList();
+}
+function renderAiList() {
+  const el = document.getElementById("aiList"); el.innerHTML = "";
+  for (const k of Object.keys(aiSaved).sort().reverse()) {
+    const rec = aiSaved[k], row = document.createElement("div"); row.className = "row";
+    const b = document.createElement("button"); b.style.flex = "3"; b.textContent = "▶ " + rec.title;
+    b.onclick = () => {
+      const frames = []; for (let i = 0; i < rec.flat.length; i += 1024) frames.push(rec.flat.subarray(i, i + 1024));
+      playFrames({ title: rec.title, fps: rec.fps, frames });
+    };
+    const x = document.createElement("button"); x.textContent = "✕";
+    x.onclick = async () => { delete aiSaved[k]; try { const db = await dbOpen(); db.transaction("ai", "readwrite").objectStore("ai").delete(k); } catch (e) {} renderAiList(); };
+    row.append(b, x); el.appendChild(row);
+  }
+}
+
+// ---------------------------------------------------------------- buttons
+async function makeShapesAnim(prompt) {
+  if (!prompt) { aiInfo("Type what to animate first"); return; }
+  if (!oaiKey()) { aiInfo("Add your OpenAI key in OpenAI settings first"); return; }
+  send("W"); aiInfo("AI is designing the animation...");
+  try {
+    const raw = await openaiChat(SHAPES_SYSTEM, "Animation: " + prompt, true);
+    const spec = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
+    const a = renderShapes(spec);
+    await aiSave(a); playFrames(a);
+  } catch (e) { aiInfo("AI error: " + e.message); send("F:sad"); }
+}
+async function makePictureAnim(prompt) {
+  if (!prompt) { aiInfo("Type what to draw first"); return; }
+  if (!oaiKey()) { aiInfo("Add your OpenAI key in OpenAI settings first"); return; }
+  const style = document.getElementById("aiStyle").value;
+  send("W"); aiInfo("AI is drawing the picture (can take 20-60 s)...");
+  try {
+    const look = style === "line"
+      ? "Bold thick white outline line art on a pure black background, very high contrast, simple shapes, no shading, no text"
+      : "High contrast black and white picture on a black background, strong lighting, simple composition, no text";
+    const src = await openaiImage(`${prompt}. ${look}. Wide landscape composition with the subject centered, for a tiny 128x64 monochrome screen.`);
+    const a = renderPicture(await loadImage(src), style, prompt.slice(0, 24));
+    await aiSave(a); playFrames(a);
+  } catch (e) { aiInfo("AI error: " + e.message); send("F:sad"); }
+}
+document.getElementById("aiShapes").onclick = () => makeShapesAnim(document.getElementById("aiPrompt").value.trim());
+document.getElementById("aiPicture").onclick = () => makePictureAnim(document.getElementById("aiPrompt").value.trim());
+document.getElementById("aiStop").onclick = () => { send("F:neutral"); aiInfo("Stopped"); };
+aiLoadAll();
 </script>
 </body>
 </html>
