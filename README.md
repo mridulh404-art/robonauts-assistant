@@ -8,8 +8,8 @@ It runs on its own from a power bank. A phone web dashboard controls it over Blu
 (Open it in **Chrome on Android**, because Web Bluetooth is needed.)
 
 <p align="center">
-  <img src="images/robot_ai_rocket.jpg" width="48%" alt="Robot showing an AI-generated rocket animation">
-  <img src="images/robot_face.jpg" width="48%" alt="Robot showing its angry face">
+  <img src="robot_ai_rocket.jpg" width="48%" alt="Robot showing an AI-generated rocket animation">
+  <img src="robot_face.jpg" width="48%" alt="Robot showing its angry face">
 </p>
 <p align="center"><i>Left: a rocket animation on the OLED face. Right: one of its 9 expressions.</i></p>
 
